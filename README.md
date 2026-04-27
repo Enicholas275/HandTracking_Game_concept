@@ -1,2 +1,2 @@
-# HandTracking_Game_concept
-this is a quick Hand Tracking game concept made with AI playable by HTML
+# FingerTracking_Game_concept
+este es un concepto rapido hecho con IA de un juego que detecta tu dedo, esto fue hecho unicamente como testeo
