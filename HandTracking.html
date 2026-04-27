@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Esquiva con tu Mano</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            color: white;
+        }
+        #container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border: 4px solid #333;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 0 30px rgba(0,255,0,0.2);
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        video { display: none; }
+        
+        #ui {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #score {
+            position: absolute;
+            top: 20px; left: 20px;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px black;
+        }
+        
+        .overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            text-align: center;
+            padding: 20px;
+        }
+        .hidden { display: none !important; }
+        
+        h1 { margin: 0 0 15px 0; }
+        p { color: #ccc; margin: 0 0 20px 0; max-width: 80%; line-height: 1.5; }
+        .red { color: #f00; }
+        .green { color: #0f0; }
+        .warning { color: #f1c40f; font-size: 14px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <video id="videoInput" playsinline></video>
+        <canvas id="gameCanvas" width="640" height="480"></canvas>
+        
+        <div id="ui">
+            <div id="score">Puntos: 0</div>
+        </div>
+
+        <!-- Pantalla de Carga -->
+        <div id="loadingScreen" class="overlay">
+            <h1 class="green">Cargando IA...</h1>
+            <p>Descargando el modelo de detección de manos. Esto puede tardar unos segundos la primera vez.</p>
+        </div>
+
+        <!-- Pantalla de Error (Si bloquean la cámara) -->
+        <div id="errorScreen" class="overlay hidden">
+            <h1 class="red">Error de Cámara</h1>
+            <p id="errorMessage">No se pudo acceder a la cámara.</p>
+            <p class="warning">SOLUCIÓN: Los navegadores bloquean la cámara si abres el archivo con doble clic. Debes usar un servidor local (ej: extensión "Live Server" en VSCode) o subirlo a un hosting.</p>
+        </div>
+
+        <!-- Pantalla de Game Over -->
+        <div id="gameOverScreen" class="overlay hidden">
+            <h1 class="red" style="font-size: 50px;">¡HAS PERDIDO!</h1>
+            <div id="finalScore" style="font-size: 40px; color: white; margin: 20px 0;">0</div>
+            <p>El juego ha terminado. Recarga la página para intentar de nuevo.</p>
+        </div>
+    </div>
+
+    <!-- Cargar SOLO la librería de detección de manos -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        const videoElement = document.getElementById("videoInput");
+        
+        const scoreElement = document.getElementById("score");
+        const loadingScreen = document.getElementById("loadingScreen");
+        const errorScreen = document.getElementById("errorScreen");
+        const errorMessage = document.getElementById("errorMessage");
+        const gameOverScreen = document.getElementById("gameOverScreen");
+        const finalScoreElement = document.getElementById("finalScore");
+
+        // Variables del Juego
+        let playerX = canvas.width / 2;
+        let playerY = canvas.height / 2;
+        const playerRadius = 15;
+        let handDetected = false;
+
+        let obstacles = [];
+        let score = 0;
+        let gameOver = false;
+        let frameCount = 0;
+        let difficulty = 3;
+
+        // 1. Configurar la IA de MediaPipe
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.5
+        });
+
+        // 2. Pedir acceso a la cámara de forma nativa
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 640, height: 480, facingMode: "user" } 
+                });
+                videoElement.srcObject = stream;
+                
+                // Esperar a que el video esté listo para empezar a enviar frames a la IA
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    loadingScreen.classList.add("hidden"); // Ocultar "Cargando IA..."
+                    detectHands(); // Iniciar el bucle
+                };
+            } catch (err) {
+                console.error("Error al acceder a la cámara:", err);
+                loadingScreen.classList.add("hidden");
+                errorScreen.classList.remove("hidden");
+                errorMessage.innerText = err.message + " (¿Abriste el archivo por doble clic?)";
+            }
+        }
+
+        // 3. Bucle de detección
+        async function detectHands() {
+            if (gameOver) return; // Parar si pierdes para no gastar CPU
+            await hands.send({ image: videoElement });
+            requestAnimationFrame(detectHands);
+        }
+
+        // 4. Lo que pasa cuando la IA detecta (o no) una mano
+        hands.onResults((results) => {
+            // Dibujar fondo (Espejado manualmente con código para que los textos no se volteen)
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+            ctx.restore();
+
+            // Capa oscura para ver mejor el juego
+            ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Actualizar posición de la mano
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                handDetected = true;
+                const indexFinger = results.multiHandLandmarks[0][8];
+                
+                // Como volteamos el canvas arriba, hay que invertir la X para que el movimiento sea natural
+                playerX = (1 - indexFinger.x) * canvas.width;
+                playerY = indexFinger.y * canvas.height;
+            } else {
+                handDetected = false;
+            }
+
+            // Si no perdimos, actualizamos la lógica del juego aquí mismo
+            if (!gameOver) {
+                updateGame();
+            }
+            
+            drawGame();
+        });
+
+        function updateGame() {
+            if (!handDetected) return; // No hay obstáculos si no hay mano
+
+            frameCount++;
+            if (frameCount % 300 === 0) difficulty += 0.5; // Aumentar dificultad
+
+            // Generar obstáculos cada 30 frames
+            if (frameCount % 30 === 0) {
+                let size = 20 + Math.random() * 30;
+                obstacles.push({
+                    x: canvas.width + size,
+                    y: Math.random() * canvas.height,
+                    radius: size,
+                    speed: difficulty + Math.random() * 3
+                });
+            }
+
+            // Mover y comprobar obstáculos
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                let obs = obstacles[i];
+                obs.x -= obs.speed;
+
+                // Comprobar colisión (Distancia entre centros < suma de radios)
+                let distance = Math.hypot(playerX - obs.x, playerY - obs.y);
+                if (distance < (playerRadius + obs.radius)) {
+                    gameOver = true;
+                    finalScoreElement.innerText = `Puntuación Final: ${score}`;
+                    gameOverScreen.classList.remove("hidden");
+                    return; // Parar de actualizar
+                }
+
+                // Si sale de la pantalla, sumar puntos y eliminar
+                if (obs.x + obs.radius < 0) {
+                    obstacles.splice(i, 1);
+                    score += 10;
+                    scoreElement.innerText = `Puntos: ${score}`;
+                }
+            }
+        }
+
+        function drawGame() {
+            // Dibujar Obstáculos
+            for (let obs of obstacles) {
+                ctx.beginPath();
+                ctx.arc(obs.x, obs.y, obs.radius, 0, Math.PI * 2);
+                ctx.fillStyle = "red";
+                ctx.fill();
+                ctx.strokeStyle = "darkred";
+                ctx.lineWidth = 4;
+                ctx.stroke();
+            }
+
+            // Dibujar Jugador (Solo si se detecta la mano)
+            if (handDetected && !gameOver) {
+                // Resplandor
+                ctx.beginPath();
+                ctx.arc(playerX, playerY, playerRadius + 10, 0, Math.PI * 2);
+                ctx.fillStyle = "rgba(0, 255, 0, 0.3)";
+                ctx.fill();
+
+                // Punto principal
+                ctx.beginPath();
+                ctx.arc(playerX, playerY, playerRadius, 0, Math.PI * 2);
+                ctx.fillStyle = "#0f0";
+                ctx.fill();
+                ctx.strokeStyle = "#fff";
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+        }
+
+        // Iniciar todo el proceso
+        initCamera();
+
+    </script>
+</body>
+</html></html>
